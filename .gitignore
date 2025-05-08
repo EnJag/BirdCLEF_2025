@@ -138,4 +138,3 @@ data
 
 # ignore whole output folders
 outputs/
-models/
