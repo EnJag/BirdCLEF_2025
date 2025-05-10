@@ -1,39 +1,29 @@
-# src/data_utils.py
+# src/simple_dataset.py
 import torch
 import torchaudio
 import torchaudio.transforms as T
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+import pandas as pd
 import numpy as np
 import os
-import pandas as pd # Import pandas
 import joblib
 
-from . import config # Import from our config file
+from . import config as cfg
 
-# --- Audio Transformations (defined once, potentially moved to device) ---
-mel_spectrogram_transform = T.MelSpectrogram(
-    sample_rate=config.SAMPLE_RATE,
-    n_fft=config.N_FFT,
-    hop_length=config.HOP_LENGTH,
-    n_mels=config.N_MELS
-).to(config.DEVICE)
-
-amplitude_to_db_transform = T.AmplitudeToDB().to(config.DEVICE)
-
-
-class BirdSoundDataset(Dataset): # Keep this class as is
-    def __init__(self, filepaths, labels, target_sample_rate, target_length_frames,
-                 mel_transform, db_transform, device, is_train=True):
+class BirdSoundDataset(Dataset):
+    """
+    A simplified dataset class for loading and processing bird audio.
+    """
+    def __init__(self, filepaths, labels, audio_cfg, mel_transform, db_transform, is_train=True, dataset_name="unknown"):
         self.filepaths = filepaths
-        self.labels = labels
-        self.target_sample_rate = target_sample_rate
-        self.target_length_frames = target_length_frames
-        self.mel_transform = mel_transform
-        self.db_transform = db_transform
-        self.device = device
+        self.labels = labels # These are integer labels
+        self.audio_cfg = audio_cfg
+        self.mel_transform = mel_transform # .to(cfg.DEVICE) # Ensure transform is on device
+        self.db_transform = db_transform # .to(cfg.DEVICE)   # Ensure transform is on device
         self.is_train = is_train
+        self.dataset_name = dataset_name
 
     def __len__(self):
         return len(self.filepaths)
@@ -43,152 +33,162 @@ class BirdSoundDataset(Dataset): # Keep this class as is
         label = self.labels[idx]
 
         try:
-            waveform, sample_rate = torchaudio.load(filepath)
-            waveform = waveform.to(self.device)
+            waveform, sr = torchaudio.load(filepath)
+            # waveform = waveform.to(cfg.DEVICE) # Move waveform to device early
 
-            if sample_rate != self.target_sample_rate:
-                resampler = T.Resample(orig_freq=sample_rate, new_freq=self.target_sample_rate).to(self.device)
+            # 1. Resample if necessary
+            if sr != self.audio_cfg['sample_rate']:
+                resampler = T.Resample(orig_freq=sr, new_freq=self.audio_cfg['sample_rate']) # .to(cfg.DEVICE)
                 waveform = resampler(waveform)
 
+            # 2. Convert to Mono
             if waveform.shape[0] > 1:
                 waveform = torch.mean(waveform, dim=0, keepdim=True)
 
+            # 3. Apply Mel Spectrogram and dB conversion
             mel_spec = self.mel_transform(waveform)
             mel_spec_db = self.db_transform(mel_spec)
 
-            current_length = mel_spec_db.shape[2]
-            if current_length > self.target_length_frames:
-                if self.is_train:
-                    start = torch.randint(0, current_length - self.target_length_frames + 1, (1,)).item()
-                    mel_spec_db = mel_spec_db[:, :, start:start + self.target_length_frames]
-                else:
-                    mel_spec_db = mel_spec_db[:, :, :self.target_length_frames]
-            elif current_length < self.target_length_frames:
-                padding_needed = self.target_length_frames - current_length
-                pad_value = -80.0
-                mel_spec_db = torch.nn.functional.pad(mel_spec_db, (0, padding_needed), mode='constant', value=pad_value)
+            # 4. Fix Spectrogram Length (padding or truncation)
+            current_frames = mel_spec_db.shape[2]
+            target_frames = self.audio_cfg['fixed_spec_frames']
 
+            if current_frames > target_frames:
+                if self.is_train: # Random crop for training augmentation
+                    start = torch.randint(0, current_frames - target_frames + 1, (1,)).item()
+                    mel_spec_db = mel_spec_db[:, :, start:start + target_frames]
+                else: # Center or start crop for validation
+                    mel_spec_db = mel_spec_db[:, :, :target_frames] # Simple truncation from start
+            elif current_frames < target_frames:
+                padding_needed = target_frames - current_frames
+                # Pad with a value representing silence in dB scale
+                mel_spec_db = torch.nn.functional.pad(mel_spec_db, (0, padding_needed), mode='constant', value=-80.0)
+            
+            # 5. Normalize (per spectrogram)
             mean = mel_spec_db.mean()
             std = mel_spec_db.std()
-            if std > 1e-6:
-                 mel_spec_db = (mel_spec_db - mean) / std
-
-            mel_spec_db = mel_spec_db.repeat(1, 3, 1, 1).squeeze(0)
+            if std > 1e-6: # Avoid division by zero for silent spectrograms
+                mel_spec_db = (mel_spec_db - mean) / std
+            
+            # 6. Add channel dimension for CNN (e.g., ResNet expects 3 channels)
+            # Input shape: (1, n_mels, fixed_spec_frames) -> (3, n_mels, fixed_spec_frames)
+            mel_spec_db = mel_spec_db.repeat(3, 1, 1) # Repeat the single channel 3 times
 
             return mel_spec_db, torch.tensor(label, dtype=torch.long)
 
         except Exception as e:
-            print(f"Error processing file {filepath}: {e}")
-            # Fallback for problematic files - consider how you want to handle these
-            dummy_spec = torch.zeros((3, config.N_MELS, self.target_length_frames), device=self.device)
-            dummy_label = torch.tensor(-1, dtype=torch.long) # Invalid label
-            return dummy_spec, dummy_label
+            print(f"!!!!!!!! ERROR IN {self.dataset_name.upper()} DATASET !!!!!!!!")
+            print(f"Error processing file: {filepath}")
+            print(f"Specific error: {type(e).__name__}: {e}")
+            # import traceback # Uncomment for full traceback during deep debugging
+            # traceback.print_exc()
+            # Return a dummy tensor and an invalid label to be filtered by collate_fn
+            dummy_spec = torch.zeros((3, self.audio_cfg['n_mels'], self.audio_cfg['fixed_spec_frames']), device=cfg.DEVICE)
+            return dummy_spec, torch.tensor(-1, dtype=torch.long)
 
-def collate_fn(batch): # Keep this function as is
+def simple_collate_fn(batch):
+    """
+    Filters out samples that failed to process (where label is -1).
+    """
+    # Filter out items where the label is -1 (indicating an error during __getitem__)
     batch = [item for item in batch if item[1].item() != -1]
-    if not batch:
+    if not batch: # If all items in batch failed
+        # Return empty tensors with correct first dimension for batch size
+        # and subsequent dimensions matching expected output.
+        # This helps avoid crashes if an entire batch fails.
+        # Note: The shape of the empty tensor's data part (e.g., spec shape) needs to be correct.
+        # For simplicity, if all fail, we return completely empty tensors.
+        # The training loop should handle inputs.numel() == 0.
         return torch.empty(0), torch.empty(0)
+    # Proceed with default collation if batch is not empty
     return torch.utils.data.dataloader.default_collate(batch)
 
-def get_data_loaders(data_dir, csv_path, target_label_col, batch_size,
-                     val_split_size, random_state, label_encoder_path):
+
+def get_data_loaders():
     """
-    Loads data based on a CSV file.
-    Args:
-        data_dir (str): Base directory where audio subfolders (like '1139490') are located.
-        csv_path (str): Path to the train.csv file.
-        target_label_col (str): Name of the column in CSV to use as labels.
-        batch_size (int): Batch size for DataLoaders.
-        val_split_size (float): Proportion of data for validation.
-        random_state (int): Random seed for reproducibility.
-        label_encoder_path (str): Path to save/load the LabelEncoder.
-    Returns:
-        train_loader, val_loader, label_encoder
+    Reads data from CSV, creates datasets and dataloaders.
+    Returns: train_loader, val_loader, label_encoder, num_classes
     """
+    print(f"Loading data from CSV: {cfg.TRAIN_CSV_PATH}")
     try:
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(cfg.TRAIN_CSV_PATH)
     except FileNotFoundError:
-        print(f"Error: CSV file not found at {csv_path}")
+        print(f"ERROR: CSV file not found at {cfg.TRAIN_CSV_PATH}")
         raise
-    except Exception as e:
-        print(f"Error reading CSV file {csv_path}: {e}")
-        raise
+    
+    # Construct full file paths
+    all_filepaths = [os.path.join(cfg.TRAIN_AUDIO_DIR, fname) for fname in df['filename']]
+    labels_str = df[cfg.TARGET_LABEL_COLUMN].astype(str).tolist() # Ensure labels are strings
 
-    all_filepaths = []
-    labels_str = []
-    valid_files_count = 0
-    missing_files_count = 0
+    # Check how many files actually exist
+    existing_filepaths = []
+    existing_labels_str = []
+    for fp, label_s in zip(all_filepaths, labels_str):
+        if os.path.exists(fp):
+            existing_filepaths.append(fp)
+            existing_labels_str.append(label_s)
+        # else: # Optional: print missing files
+            # print(f"Warning: File not found {fp}, skipping.")
+    
+    if not existing_filepaths:
+        raise ValueError("No valid audio file paths found. Check TRAIN_AUDIO_DIR and filenames in CSV.")
+    print(f"Found {len(existing_filepaths)} existing audio files out of {len(all_filepaths)} listed in CSV.")
 
-    print(f"Reading audio file paths and labels from {csv_path}...")
-    for index, row in df.iterrows():
-        # The 'filename' column already contains the path relative to 'train_audio'
-        # e.g., '1139490/CSA36385.ogg'
-        relative_path = row['filename']
-        full_path = os.path.join(data_dir, relative_path)
-
-        if os.path.exists(full_path):
-            all_filepaths.append(full_path)
-            labels_str.append(str(row[target_label_col])) # Ensure label is string for encoder
-            valid_files_count += 1
-        else:
-            # print(f"Warning: File not found: {full_path} (skipped)") # Optional: for debugging
-            missing_files_count += 1
-
-    if missing_files_count > 0:
-        print(f"Warning: {missing_files_count} out of {len(df)} files listed in CSV were not found on disk.")
-
-    if not all_filepaths:
-        raise FileNotFoundError(f"No valid audio files found based on CSV {csv_path} and DATA_DIR {data_dir}. "
-                                "Check paths and file existence.")
-
-    print(f"Found {len(all_filepaths)} existing audio files with labels.")
-
+    # Encode labels
     label_encoder = LabelEncoder()
-    integer_labels = label_encoder.fit_transform(labels_str)
+    integer_labels = label_encoder.fit_transform(existing_labels_str)
+    num_classes = len(label_encoder.classes_)
+    print(f"Number of unique classes found ('{cfg.TARGET_LABEL_COLUMN}'): {num_classes}")
+    
+    # Save LabelEncoder
+    os.makedirs(os.path.dirname(cfg.LABEL_ENCODER_SAVE_PATH), exist_ok=True)
+    joblib.dump(label_encoder, cfg.LABEL_ENCODER_SAVE_PATH)
+    print(f"LabelEncoder saved to {cfg.LABEL_ENCODER_SAVE_PATH}")
 
-    # Save the fitted LabelEncoder
-    try:
-        joblib.dump(label_encoder, label_encoder_path)
-        print(f"LabelEncoder saved to {label_encoder_path}")
-    except Exception as e:
-        print(f"Error saving LabelEncoder to {label_encoder_path}: {e}")
-
-
-    num_unique_labels = len(label_encoder.classes_)
-    print(f"Number of unique labels found: {num_unique_labels}")
-    if num_unique_labels != config.NUM_CLASSES:
-        print(f"WARNING: Number of unique labels ({num_unique_labels}) from CSV column '{target_label_col}' "
-              f"does not match NUM_CLASSES in config ({config.NUM_CLASSES}). "
-              f"Please verify NUM_CLASSES in config.py or your target_label_col.")
-    # You might want to make this an assert or allow NUM_CLASSES to be determined dynamically:
-    # config.NUM_CLASSES = num_unique_labels # If you want to set it dynamically
-
-    train_filepaths, val_filepaths, train_labels, val_labels = train_test_split(
-        all_filepaths, integer_labels,
-        test_size=val_split_size,
-        random_state=random_state,
-        stratify=integer_labels if num_unique_labels > 1 else None # Stratify only if more than 1 class
+    # Split data
+    train_files, val_files, train_labels, val_labels = train_test_split(
+        existing_filepaths, integer_labels,
+        test_size=cfg.VALIDATION_SPLIT_SIZE,
+        random_state=cfg.RANDOM_STATE,
+        stratify=integer_labels if num_classes > 1 else None # Stratify if more than one class
     )
 
-    print(f"Total files for training/validation: {len(all_filepaths)}")
-    print(f"Training samples: {len(train_filepaths)}, Validation samples: {len(val_filepaths)}")
+    # Audio processing parameters dictionary
+    audio_params = {
+        'sample_rate': cfg.SAMPLE_RATE,
+        'n_mels': cfg.N_MELS,
+        'n_fft': cfg.N_FFT,
+        'hop_length': cfg.HOP_LENGTH,
+        'fixed_spec_frames': cfg.FIXED_SPEC_FRAMES
+    }
 
+    # Define Mel Spectrogram transformations (to be passed to dataset)
+    # These are initialized here and moved to device within the dataset or here.
+    # For simplicity, let's assume they are stateless enough to be created on CPU first.
+    mel_transform = T.MelSpectrogram(
+        sample_rate=cfg.SAMPLE_RATE,
+        n_fft=cfg.N_FFT,
+        hop_length=cfg.HOP_LENGTH,
+        n_mels=cfg.N_MELS
+    ) # .to(cfg.DEVICE) # Can be moved to device here or in Dataset
+    db_transform = T.AmplitudeToDB() # .to(cfg.DEVICE)
+
+    # Create Datasets
     train_dataset = BirdSoundDataset(
-        train_filepaths, train_labels, config.SAMPLE_RATE, config.FIXED_LENGTH_FRAMES,
-        mel_spectrogram_transform, amplitude_to_db_transform, config.DEVICE, is_train=True
+        train_files, train_labels, audio_params, mel_transform, db_transform, is_train=True, dataset_name="train"
     )
     val_dataset = BirdSoundDataset(
-        val_filepaths, val_labels, config.SAMPLE_RATE, config.FIXED_LENGTH_FRAMES,
-        mel_spectrogram_transform, amplitude_to_db_transform, config.DEVICE, is_train=False
+        val_files, val_labels, audio_params, mel_transform, db_transform, is_train=False, dataset_name="val"
     )
 
+    # Create DataLoaders
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=2, pin_memory=True, collate_fn=collate_fn
+        train_dataset, batch_size=cfg.BATCH_SIZE, shuffle=True,
+        num_workers=0, pin_memory=True, collate_fn=simple_collate_fn # num_workers=0 for simplicity/debugging
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=2, pin_memory=True, collate_fn=collate_fn
+        val_dataset, batch_size=cfg.BATCH_SIZE, shuffle=False,
+        num_workers=0, pin_memory=True, collate_fn=simple_collate_fn
     )
-
-    return train_loader, val_loader, label_encoder
+    print(f"Train DataLoader: {len(train_loader)} batches. Val DataLoader: {len(val_loader)} batches.")
+    return train_loader, val_loader, label_encoder, num_classes

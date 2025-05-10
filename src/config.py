@@ -1,47 +1,48 @@
-# src/config.py
-import os
+# src/simple_config.py
 import torch
+import os
 
-# --- Project Root ---
+# --- Project Root (assuming this file is in project_root/src/) ---
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
-# --- Overall Configuration ---
-# DATA_DIR should point to the folder containing the subfolders named by 'primary_label' IDs
-# e.g., if your CSV has 'filename' as '1139490/CSA36385.ogg',
-# and your files are in 'your_project_root_name/data/train_audio/1139490/CSA36385.ogg',
-# then DATA_DIR should be 'your_project_root_name/data/train_audio'
-DATA_DIR = os.path.join(ROOT_DIR, 'data', 'train_audio')
-TRAIN_CSV_PATH = os.path.join(ROOT_DIR, 'data', 'metadata', 'train.csv') # Path to your CSV file
+# --- Data Configuration ---
+# Adjust DATA_BASE_DIR to where your 'data' folder (containing 'train_audio' and 'train.csv') is located
+# If 'data' is in the project root, this is correct.
+DATA_BASE_DIR = os.path.join(ROOT_DIR, 'data')
+TRAIN_AUDIO_DIR = os.path.join(DATA_BASE_DIR, 'train_audio')
+TRAIN_CSV_PATH = os.path.join(DATA_BASE_DIR, 'metadata', 'train.csv')
+LABEL_ENCODER_SAVE_PATH = os.path.join(ROOT_DIR, 'models', 'simple_label_encoder.joblib')
+MODEL_SAVE_DIR = os.path.join(ROOT_DIR, 'models') # Directory to save models
 
-MODEL_SAVE_DIR = os.path.join(ROOT_DIR, 'models')
+# Ensure model save directory exists
 if not os.path.exists(MODEL_SAVE_DIR):
     os.makedirs(MODEL_SAVE_DIR)
     print(f"Created directory: {MODEL_SAVE_DIR}")
 
-MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, 'best_bird_classifier_model.pth')
-LABEL_ENCODER_PATH = os.path.join(MODEL_SAVE_DIR, 'label_encoder.joblib')
-
-# IMPORTANT: NUM_CLASSES should be the number of unique primary_labels OR common_names
-# you intend to classify. You might need to determine this from your CSV.
-# For now, let's assume it's still 206, but verify this.
-# If you use 'common_name' as your label, count unique common_names in train.csv
-NUM_CLASSES = 206 # Placeholder - VERIFY THIS from your CSV and chosen label column
-TARGET_LABEL_COLUMN = 'common_name' # Choose: 'primary_label', 'common_name', or 'scientific_name'
+BEST_MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, 'simple_best_model.pth')
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# --- Labeling ---
+# Choose the column from your train.csv to use as the target label
+# Options: 'primary_label', 'common_name', 'scientific_name'
+TARGET_LABEL_COLUMN = 'common_name'
+# NUM_CLASSES will be determined dynamically from the data by the LabelEncoder
 
 # --- Training Hyperparameters ---
-BATCH_SIZE = 32 # Make sure this is the variable you used in the notebook
-NUM_EPOCHS = 25
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BATCH_SIZE = 16 # Smaller batch size for easier debugging initially
+NUM_EPOCHS = 20  # Fewer epochs for quick testing
 LEARNING_RATE = 0.001
-VALIDATION_SPLIT_SIZE = 0.2 # Make sure this is the variable you used in the notebook
-RANDOM_STATE = 42 # Make sure this is the variable you used in the notebook
+VALIDATION_SPLIT_SIZE = 0.2
+RANDOM_STATE = 42 # For reproducibility
 
 # --- Audio Processing Parameters ---
-SAMPLE_RATE = 16000
-N_MELS = 128
-N_FFT = 1024
-HOP_LENGTH = 512
-FIXED_LENGTH_SECONDS = 5
-FIXED_LENGTH_FRAMES = int(FIXED_LENGTH_SECONDS * SAMPLE_RATE / HOP_LENGTH) + 1
+SAMPLE_RATE = 16000  # Target sample rate for audio
+N_MELS = 128         # Number of Mel frequency bands in the spectrogram
+N_FFT = 1024         # Size of the Fast Fourier Transform window
+HOP_LENGTH = 512     # Number of samples between successive STFT columns
+FIXED_DURATION_SECONDS = 5 # Duration to pad/truncate audio to (in seconds)
+# Calculated length of spectrogram frames based on duration
+FIXED_SPEC_FRAMES = int(FIXED_DURATION_SECONDS * SAMPLE_RATE / HOP_LENGTH) + 1
+
+print(f"Configuration Loaded: Device={DEVICE}, Audio Dir={TRAIN_AUDIO_DIR}, CSV={TRAIN_CSV_PATH}")

@@ -135,6 +135,8 @@ data
 *.bin
 *.ckpt
 *.h5
+*.joblib
 
 # ignore whole output folders
 outputs/
+checkpoint/
