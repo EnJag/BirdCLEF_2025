@@ -9,7 +9,7 @@ from tqdm import tqdm
 from . import config as cfg
 from .resnet18 import get_bird_model
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, phase_name="Train"):
+def train(model, dataloader, criterion, optimizer, device, phase_name="Train"):
     """
     Trains the model for one epoch.
     Returns: epoch_loss, epoch_accuracy

@@ -140,3 +140,4 @@ data
 # ignore whole output folders
 outputs/
 checkpoint/
+models/
